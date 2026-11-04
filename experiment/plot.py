@@ -11,11 +11,10 @@ import numpy as np
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.colors import LogNorm
 
 DELTA, COPY = 0.02, 0.10  # gap threshold for a warning, copy rate for onset
 INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e4e3df"
-BLUE, ORANGE = "#2a78d6", "#eb6834"
+BLUE, ORANGE, AQUA = "#2a78d6", "#eb6834", "#1baf7a"
 
 
 def first(mask, marks):
@@ -62,58 +61,47 @@ def summarize(runs):
                 print(f"  {key:13s} {np.mean(vals):10.3f} +- {np.std(vals):8.3f}  {np.round(vals, 3).tolist()}")
 
 
-def figure(runs, out, n=300):
-    group = runs[n]
-    marks = group[0][1]["marks"]
-    centers = group[0][1]["centers"]
-    gap = np.mean([z["L_held"] - z["L_train"] for _, z in group], 0)
-    mem = np.array([z["mem"] for _, z in group])
-    split = group[0][0]["split"]
-    sig = np.array([r["sigma"] for r in split])
-    high = np.array([[r["late_high"] for r in res["split"]] for res, _ in group])
-    low = np.array([[r["late_low"] for r in res["split"]] for res, _ in group])
+def figure(root, out):
+    arms = [
+        ("no rule", "base", BLUE, "-"),
+        ("live rule", "rule_online", ORANGE, "--"),
+        ("fixed rule", "rule_fixed", AQUA, "-."),
+    ]
+    data = {key: np.load(f"{root}/{key}_n300_s0.npz") for _, key, _, _ in arms}
+    floor = json.load(open(f"{root}/base_n300_s0.json"))["train_vs_test_fid"]
 
     plt.rcParams.update({
         "font.family": "serif", "font.size": 8, "axes.edgecolor": MUTED, "axes.labelcolor": INK,
         "xtick.color": MUTED, "ytick.color": MUTED, "axes.spines.top": False, "axes.spines.right": False,
     })
-    fig = plt.figure(figsize=(5.5, 2.2), constrained_layout=True)
-    grid = fig.add_gridspec(2, 2, width_ratios=[1.25, 1], height_ratios=[2.1, 1])
-    a = fig.add_subplot(grid[0, 0])
-    b = fig.add_subplot(grid[1, 0], sharex=a)
-    c = fig.add_subplot(grid[:, 1])
+    fig, (a, b, c) = plt.subplots(1, 3, figsize=(5.5, 1.55), constrained_layout=True)
 
-    edges_x = np.sqrt(marks[:-1] * marks[1:])
-    edges_x = np.r_[marks[0] ** 2 / edges_x[0], edges_x, marks[-1] ** 2 / edges_x[-1]]
-    ratio = centers[1] / centers[0]
-    edges_y = np.r_[centers / np.sqrt(ratio), centers[-1] * np.sqrt(ratio)]
-    im = a.pcolormesh(
-        edges_x, edges_y, np.clip(gap.T, DELTA / 2, None), cmap="Blues",
-        norm=LogNorm(vmin=DELTA / 2, vmax=gap.max()), rasterized=True,
-    )
-    a.contour(marks, centers, gap.T, levels=[DELTA], colors=INK, linewidths=0.9)
-    a.set(xscale="log", yscale="log", ylabel=r"noise level $\sigma$")
-    a.tick_params(labelbottom=False)
-    bar = fig.colorbar(im, ax=a, pad=0.01, fraction=0.05)
-    bar.set_label("held-out − train loss", fontsize=7)
-    bar.ax.tick_params(labelsize=6.5)
-    a.set_title("(a) Where the gap opens", loc="left", fontsize=8, color=INK)
+    for label, key, color, style in arms:
+        z = data[key]
+        a.plot(z["marks"], 100 * z["mem"], color=color, ls=style, lw=1.3, label=label)
+        b.plot(z["marks"], z["fid"], color=color, ls=style, lw=1.3)
+        if key != "rule_fixed":
+            c.plot(z["marks"], z["L_train"][:, 0], color=color, ls=style, lw=1.3)
+        if key != "rule_online":
+            stop = np.argmin(z["L_held"].mean(1))
+            b.plot(z["marks"][stop], z["fid"][stop], "o", ms=4, mfc="white", mec=color, mew=1.1, zorder=3)
 
-    b.plot(marks, 100 * mem.mean(0), color=INK, lw=1.4)
-    b.fill_between(marks, 100 * mem.min(0), 100 * mem.max(0), color=INK, alpha=0.15, lw=0)
-    b.set(xscale="log", xlabel="training step", ylabel="copies (%)", ylim=(-3, 103))
-    b.grid(axis="y", color=GRID, lw=0.5)
-    b.set_yticks([0, 50, 100])
-    for axis in (a, b):
-        axis.set_xlim(marks[0], marks[-1])
+    a.set(ylabel="copies (%)", ylim=(-3, 103))
+    b.set(ylabel="FID", yscale="log", ylim=(7, 400))
+    b.axhline(floor, color=MUTED, lw=0.7, ls=":")
+    c.set(ylabel="train loss", yscale="log", ylim=(0.05, 5))
+    c.axvline(13250, color=MUTED, lw=0.7, ls=":")
+    c.text(12300, 3.6, "band\nfrozen", fontsize=6.5, color=MUTED, ha="right", va="top")
+    c.text(1100, 0.06, r"$\sigma\approx 0.02$", fontsize=6.5, color=MUTED)
 
-    for ys, color, label, marker in ((high, BLUE, "late above $\\sigma$", "o"), (low, ORANGE, "late below $\\sigma$", "s")):
-        c.plot(sig, 100 * ys.mean(0), color=color, lw=1.4, marker=marker, ms=3.5, label=label)
-        c.fill_between(sig, 100 * ys.min(0), 100 * ys.max(0), color=color, alpha=0.18, lw=0)
-    c.set(xscale="log", xlabel=r"noise cutoff $\sigma$", ylabel="copies (%)", ylim=(-3, 103))
-    c.grid(axis="y", color=GRID, lw=0.5)
-    c.set_title("(b) Where copying is decided", loc="left", fontsize=8, color=INK)
-    c.legend(frameon=False, fontsize=7, loc="center right", bbox_to_anchor=(1.02, 0.42))
+    ticks = [1000, 3000, 10000, 30000]
+    for axis, title in ((a, "(a) Copying"), (b, "(b) Image quality"), (c, "(c) Forgetting")):
+        axis.set(xscale="log", xlim=(1000, 30000), xlabel="training step")
+        axis.set_xticks(ticks, ["1k", "3k", "10k", "30k"])
+        axis.minorticks_off()
+        axis.grid(axis="y", color=GRID, lw=0.5)
+        axis.set_title(title, loc="left", fontsize=8, color=INK)
+    a.legend(loc="upper left", frameon=False, fontsize=6.5, labelspacing=0.2, borderaxespad=0.1, handlelength=2.2)
 
     fig.savefig(out, dpi=300)
 
@@ -123,6 +111,5 @@ if __name__ == "__main__":
     ap.add_argument("--runs", default="runs")
     ap.add_argument("--out", default="../project/feasibility.pdf")
     args = ap.parse_args()
-    runs = load(args.runs)
-    summarize(runs)
-    figure(runs, args.out)
+    summarize(load(args.runs))
+    figure(args.runs, args.out)
