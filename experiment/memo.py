@@ -312,6 +312,20 @@ def main():
             results["outlier_spearman"] = spearman(counts, outlier)
             results["train_points_copied"] = float((counts > 0).mean())
 
+    # Where is copying decided? Use the final weights only above, or only below, a noise threshold.
+    late, early = cache[len(ckpts) - 1], cache[best_global]
+    results["split"] = []
+    for cut in range(1, N_BANDS):
+        row = {"sigma": float(edges[cut])}
+        for name, nets in {
+            "late_high": [late if b >= cut else early for b in range(N_BANDS)],
+            "late_low": [early if b >= cut else late for b in range(N_BANDS)],
+        }.items():
+            s = sample(nets, band_of, args.track_samples, seed=11)
+            row[name] = memorized(s, train)[0].float().mean().item()
+            row[name + "_fid"] = feature_fid(features(clf, s), test_feats)
+        results["split"].append(row)
+
     results["baseline_mem_test_images"] = memorized(test[:2000], train)[0].float().mean().item()
     results["train_vs_test_fid"] = feature_fid(features(clf, train), test_feats) if args.n > 64 else None
     results["best_global_step"] = int(marks[best_global])

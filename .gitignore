@@ -1,8 +1,0 @@
-.DS_Store
-__pycache__/
-data/
-runs/
-*.pt
-
-# course template and materials
-project/
