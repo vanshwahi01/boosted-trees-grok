@@ -229,6 +229,9 @@ def main():
     ap.add_argument("--batch", type=int, default=128)
     ap.add_argument("--track-samples", type=int, default=500)
     ap.add_argument("--final-samples", type=int, default=2000)
+    ap.add_argument("--skip-bands", default="", help="comma-separated noise bands never trained")
+    ap.add_argument("--freeze-ratio", type=float, default=None, help="stop training a band once held-out loss exceeds this times train loss")
+    ap.add_argument("--check-every", type=int, default=250)
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -253,15 +256,20 @@ def main():
     print(f"params {sum(p.numel() for p in net.parameters()):,} device {DEVICE}", flush=True)
 
     marks = np.unique(np.geomspace(min(250, args.steps), args.steps, args.checkpoints).astype(int))
-    ckpts, L_train, L_held, mem, fid = [], [], [], [], []
+    skip = {int(b) for b in args.skip_bands.split(",") if b}
+    active = [b for b in range(N_BANDS) if b not in skip]
+    log_edges = torch.tensor(np.log(edges), dtype=torch.float32, device=DEVICE)
+    freeze_steps, check_steps, check_train, check_held = {}, [], [], []
+    done, ckpts, L_train, L_held, mem, fid = [], [], [], [], [], []
     t0 = time.time()
     train_dev = train.to(DEVICE)
     for step in range(1, args.steps + 1):
         idx = torch.randint(0, args.n, (args.batch,), device=DEVICE)
         x = train_dev[idx]
-        sigma = torch.exp(
-            torch.rand(args.batch, device=DEVICE) * (np.log(SIGMA_MAX) - np.log(SIGMA_MIN)) + np.log(SIGMA_MIN)
-        )
+        u = torch.rand(args.batch, device=DEVICE) * len(active)
+        pick = u.long().clamp(max=len(active) - 1)
+        band = torch.tensor(active, device=DEVICE)[pick]
+        sigma = torch.exp(log_edges[band] + (u - pick) * (log_edges[band + 1] - log_edges[band]))
         loss = per_sample_loss(net, x, sigma, torch.randn_like(x)).mean()
         opt.zero_grad()
         loss.backward()
@@ -269,7 +277,18 @@ def main():
         with torch.no_grad():
             for pe, p in zip(ema.parameters(), net.parameters()):
                 pe.lerp_(p, 1 - 0.999)
-        if step in marks:
+        if args.freeze_ratio is not None and step % args.check_every == 0:
+            lt, lh = band_losses(ema, train, centers, repeats), band_losses(ema, held, centers, 1)
+            check_steps.append(step)
+            check_train.append(lt)
+            check_held.append(lh)
+            for b in list(active):
+                if lh[b] > args.freeze_ratio * lt[b]:
+                    active.remove(b)
+                    freeze_steps[b] = step
+                    print(f"step {step} froze band {b} (sigma {centers[b]:.2f})", flush=True)
+        if step in marks or not active:
+            done.append(step)
             ckpts.append({k: v.cpu().clone() for k, v in ema.state_dict().items()})
             L_train.append(band_losses(ema, train, centers, repeats))
             L_held.append(band_losses(ema, held, centers, 1))
@@ -281,7 +300,10 @@ def main():
                 f"gap={np.round(L_held[-1] - L_train[-1], 3).tolist()}",
                 flush=True,
             )
+        if not active:
+            break
 
+    marks = np.array(done)
     L_train, L_held = np.array(L_train), np.array(L_held)
 
     def build(state):
@@ -315,7 +337,10 @@ def main():
     # Where is copying decided? Use the final weights only above, or only below, a noise threshold.
     late, early = cache[len(ckpts) - 1], cache[best_global]
     results["split"] = []
-    for cut in range(1, N_BANDS):
+    results["freeze_steps"] = {str(b): s for b, s in freeze_steps.items()}
+    results["skipped_bands"] = sorted(skip)
+    baseline = not skip and args.freeze_ratio is None
+    for cut in range(1, N_BANDS if baseline else 1):
         row = {"sigma": float(edges[cut])}
         for name, nets in {
             "late_high": [late if b >= cut else early for b in range(N_BANDS)],
@@ -339,7 +364,8 @@ def main():
     (out.with_suffix(".json")).write_text(json.dumps(results, indent=1))
     np.savez(
         out.with_suffix(".npz"), marks=marks, centers=centers, L_train=L_train, L_held=L_held,
-        mem=np.array(mem), fid=np.array(fid), train=train[:64].numpy(), **{f"samples_{k}": v for k, v in samples.items()},
+        mem=np.array(mem), fid=np.array(fid), train=train[:64].numpy(), check_steps=np.array(check_steps),
+        check_train=np.array(check_train), check_held=np.array(check_held), **{f"samples_{k}": v for k, v in samples.items()},
     )
 
 
