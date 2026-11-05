@@ -70,7 +70,7 @@ def summarize(root):
         print(name, "k d n | solved | median jump | median fit | final")
         for key, g in sorted(cells.items()):
             print(key, f"{solved(g):.2f}", median_jump(g), np.median([r["fit_round"] or np.nan for r in g]), f"{np.mean([r['final'] for r in g]):.3f}")
-    for name in ("knobs", "others", "limit", "mlp", "mlp6"):
+    for name in ("knobs", "others", "libs", "limit", "mlp", "mlp6"):
         cells = defaultdict(list)
         for r in load(root, name):
             cells[(r["arm"], r["k"], r["n"])].append(r)
@@ -88,7 +88,7 @@ def figure(root, out):
         "font.family": "serif", "font.size": 8, "axes.edgecolor": MUTED, "axes.labelcolor": INK,
         "xtick.color": MUTED, "ytick.color": MUTED, "axes.spines.top": False, "axes.spines.right": False,
     })
-    fig, axes = plt.subplots(2, 2, figsize=(5.5, 2.35), constrained_layout=True)
+    fig, axes = plt.subplots(2, 2, figsize=(5.5, 2.2), constrained_layout=True)
     (a, b), (c, e) = axes
 
     picks = sorted((r for r in timing if r["jump"]), key=lambda r: r["jump"])
@@ -108,9 +108,9 @@ def figure(root, out):
     b.step(jumps, 100 * frac, where="post", color=BLUE, lw=1.3, label="observed")
     grid = np.linspace(0, jumps.max() * 1.05, 200)
     b.plot(grid, 100 * (1 - np.exp(-grid / jumps.mean())), color=MUTED, lw=0.9, ls=":", label="memoryless")
-    b.set(xlabel="round of jump", ylabel="solved (%)", ylim=(-3, 103))
+    b.set(xlabel="transition round", ylabel="solved (%)", ylim=(-3, 103))
     b.set_xticks([0, 1000, 2000], ["0", "1k", "2k"])
-    b.set_title("(b) Time to the jump", loc="left", fontsize=8, color=INK)
+    b.set_title("(b) Time to the transition", loc="left", fontsize=8, color=INK)
     b.legend(frameon=False, fontsize=6.5, loc="lower right", handlelength=1.8)
 
     late = [r for r in timing if r["jump"] and r["jump"] >= 450]
@@ -122,7 +122,7 @@ def figure(root, out):
     c.plot(x[2:-2], smooth[2:-2], color=BLUE, lw=1.3)
     c.axhline(level, color=MUTED, lw=0.7, ls=":")
     c.text(x[0], level * 1.25, "shuffled labels", fontsize=6.5, color=MUTED)
-    c.set(yscale="log", xlabel="rounds from jump", ylabel="leaves", xticks=[-400, -200, 0])
+    c.set(yscale="log", xlabel="rounds from transition", ylabel="leaves", xticks=[-400, -200, 0])
     c.set_title("(c) Complete leaves per tree", loc="left", fontsize=8, color=INK)
 
     cells = defaultdict(list)
@@ -132,9 +132,9 @@ def figure(root, out):
     for k, color, marker, style in ((2, MUTED, "s", ":"), (3, BLUE, "o", "-"), (4, ORANGE, "^", "--")):
         pts = sorted((comb(d, k), median_jump(g)) for (kk, d), g in cells.items() if kk == k and median_jump(g))
         e.plot(*zip(*pts), color=color, ls=style, marker=marker, ms=3, lw=1, label=f"k={k}")
-    e.set(xscale="log", yscale="log", xlabel="possible $k$-subsets of $d$ bits", ylabel="median jump")
+    e.set(xscale="log", yscale="log", xlabel="possible $k$-subsets of $d$ bits", ylabel="median transition")
     e.set_title("(d) Scaling", loc="left", fontsize=8, color=INK)
-    e.legend(frameon=False, fontsize=6.5, loc="upper left", handlelength=1.8, labelspacing=0.2)
+    e.legend(frameon=False, fontsize=6.5, loc="lower right", handlelength=1.8, labelspacing=0.15, borderaxespad=0.1)
     for axis in axes.flat:
         axis.grid(axis="y", color=GRID, lw=0.5)
     fig.savefig(out, dpi=300)

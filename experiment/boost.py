@@ -5,6 +5,7 @@
     python boost.py scale --out runs/boost
     python boost.py knobs --out runs/boost
     python boost.py others --out runs/boost
+    python boost.py libs --out runs/boost
     python boost.py limit --out runs/boost
     python boost.py mlp --out runs/boost
     python boost.py mlp6 --out runs/boost
@@ -102,6 +103,28 @@ def run_other(cell):
     return dict(final=float((model.predict(xb) == yb).mean()), final_train=float((model.predict(xa) == ya).mean()))
 
 
+def run_lib(cell):
+    """Train and test curves for the other two libraries, on the same data as the others experiment."""
+    xa, ya, xb, yb, _ = parity_data(cell["d"], cell["k"], cell["n"], cell["seed"])
+    seed = cell["seed"]
+    if cell["model"] == "lightgbm":
+        import lightgbm
+        model = lightgbm.LGBMClassifier(n_estimators=1000, num_leaves=31, learning_rate=0.1, verbose=-1, n_jobs=1, random_state=seed).fit(xa, ya)
+        prob = lambda x, r: model.predict_proba(x, num_iteration=r)[:, 1]
+    else:
+        import xgboost
+        model = xgboost.XGBClassifier(n_estimators=1000, max_depth=6, learning_rate=0.1, tree_method="hist", n_jobs=1, random_state=seed).fit(xa, ya)
+        prob = lambda x, r: model.predict_proba(x, iteration_range=(0, r))[:, 1]
+    marks = [10, 25, 50, 75, 100, 150, 200, 300, 400, 500, 700, 1000]
+    test = [float(((prob(xb, r) > 0.5) == yb).mean()) for r in marks]
+    train = [float(((prob(xa, r) > 0.5) == ya).mean()) for r in marks]
+    jump, fit = first_above(test, 0.9), first_above(train, 0.989)
+    return dict(
+        final=test[-1], final_train=train[-1], marks=marks, test=test, train=train,
+        jump=jump and marks[jump - 1], fit_round=fit and marks[fit - 1],
+    )
+
+
 def run_mlp(cell):
     import torch
     from torch import nn
@@ -151,6 +174,8 @@ def cells(exp):
         out += [dict(base, arm="shuffled", seed=s, shuffle=True) for s in range(10)]
     elif exp == "others":
         out = [dict(arm=m, d=31, k=4, n=3000, seed=s, model=m) for m in ("tree", "forest", "adaboost", "lightgbm", "xgboost") for s in range(10)]
+    elif exp == "libs":
+        out = [dict(arm=m, d=31, k=4, n=3000, seed=s, model=m) for m in ("lightgbm", "xgboost") for s in range(10)]
     elif exp == "limit":
         out = [dict(arm=m, d=d, k=3, n=10000, seed=s, model=m) for d in (63, 127) for m in ("tree", "forest", "adaboost") for s in range(3)]
     elif exp == "mlp6":
@@ -162,11 +187,11 @@ def cells(exp):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("exp", choices=["timing", "grid", "scale", "knobs", "others", "limit", "mlp", "mlp6"])
+    ap.add_argument("exp", choices=["timing", "grid", "scale", "knobs", "others", "libs", "limit", "mlp", "mlp6"])
     ap.add_argument("--out", default="runs/boost")
     args = ap.parse_args()
     Path(args.out).mkdir(parents=True, exist_ok=True)
-    runner = dict(others=run_other, limit=run_other, mlp=run_mlp, mlp6=run_mlp).get(args.exp, run_boost)
+    runner = dict(others=run_other, libs=run_lib, limit=run_other, mlp=run_mlp, mlp6=run_mlp).get(args.exp, run_boost)
     t0 = time.time()
     with open(f"{args.out}/{args.exp}.jsonl", "a") as f:
         for i, cell in enumerate(cells(args.exp)):
