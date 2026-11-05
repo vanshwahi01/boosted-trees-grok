@@ -9,12 +9,23 @@
     python boost.py limit --out runs/boost
     python boost.py mlp --out runs/boost
     python boost.py mlp6 --out runs/boost
+    python boost.py reweight_core --out runs/boost
+    python boost.py reweight_hard --out runs/boost
+    python boost.py boost_long --out runs/boost
+    python boost.py boost_flip --out runs/boost
+    python boost.py mlp_flip --out runs/boost
 
 Each run appends one JSON line. Decision rules fixed before the first full run:
   jump        first round with test accuracy above 0.9
   grokking    training accuracy reaches 0.99 at least 50 rounds before the jump
   luck        jump rounds at k=4, d=31, n=3000 have a coefficient of variation of at least 0.8
   build-up    that coefficient is at most 0.5; values in between are called inconclusive
+
+Rules for the reweighted forest, fixed before its full run:
+  baseline    at k=4, d=31, n=3000 it solves at least 8 of 10 runs, and shuffled labels stay at or below 55%
+  main        it also solves at least 3 more runs than boosting with 4000 rounds at k=5, d=31, n=10000 or at
+              k=4, d=63, n=10000, or scores at least 10 points higher than boosting at 2% or 10% label flips
+  otherwise   related work only
 """
 import argparse
 import json
@@ -125,13 +136,42 @@ def run_lib(cell):
     )
 
 
+def run_reweight(cell):
+    """Forests whose split candidates are sampled by the feature importance of the previous forest."""
+    import xgboost
+
+    d, seed = cell["d"], cell["seed"]
+    xa, ya, xb, yb, rel = parity_data(d, cell["k"], cell["n"], seed, cell.get("flip", 0.0), cell.get("shuffle", False))
+    weights, test, train, share, top = np.ones(d), [], [], [], []
+    for it in range(cell.get("iterations", 20)):
+        model = xgboost.XGBRFClassifier(
+            n_estimators=cell.get("trees", 200), max_depth=20, learning_rate=1.0, subsample=0.632,
+            colsample_bynode=cell.get("mtry", max(int(np.sqrt(d)), 1)) / d, reg_lambda=0.0, min_child_weight=1.0,
+            tree_method="hist", n_jobs=1, random_state=seed + it,
+        )
+        model.fit(xa, ya, feature_weights=weights)
+        test.append(round(float((model.predict(xb) == yb).mean()), 4))
+        train.append(round(float((model.predict(xa) == ya).mean()), 4))
+        score = model.get_booster().get_score(importance_type="total_gain")
+        weights = np.array([score.get(f"f{i}", 0.0) for i in range(d)]) + 1e-12
+        weights = weights / weights.sum()
+        share.append(round(float(weights[rel].sum()), 4))
+        top.append(int(set(np.argsort(weights)[-cell["k"]:].tolist()) == set(rel.tolist())))
+        if len(test) >= 2 and min(test[-2:]) > 0.99:
+            break
+    return dict(
+        final=test[-1], best=max(test), final_train=train[-1], jump=first_above(test, 0.9),
+        test=test, train=train, share=share, top=top, iterations_run=len(test),
+    )
+
+
 def run_mlp(cell):
     import torch
     from torch import nn
 
     torch.set_num_threads(1)
     torch.manual_seed(cell["seed"])
-    xa, ya, xb, yb, _ = parity_data(cell["d"], cell["k"], cell["n"], cell["seed"])
+    xa, ya, xb, yb, _ = parity_data(cell["d"], cell["k"], cell["n"], cell["seed"], cell.get("flip", 0.0))
     xa, xb = torch.tensor(2 * xa - 1), torch.tensor(2 * xb - 1)
     ya, yb = torch.tensor(2.0 * ya - 1), torch.tensor(2.0 * yb - 1)
     net = nn.Sequential(nn.Linear(cell["d"], 512), nn.ReLU(), nn.Linear(512, 1))
@@ -176,6 +216,25 @@ def cells(exp):
         out = [dict(arm=m, d=31, k=4, n=3000, seed=s, model=m) for m in ("tree", "forest", "adaboost", "lightgbm", "xgboost") for s in range(10)]
     elif exp == "libs":
         out = [dict(arm=m, d=31, k=4, n=3000, seed=s, model=m) for m in ("lightgbm", "xgboost") for s in range(10)]
+    elif exp == "reweight_core":
+        out = [dict(arm="reweight", d=31, k=k, n=n, seed=s) for k, n in ((3, 3000), (4, 1000), (4, 3000), (4, 10000)) for s in range(10)]
+        out += [dict(arm="reweight-shuffled", d=31, k=4, n=3000, seed=s, shuffle=True) for s in range(10)]
+        out += [dict(arm=f"reweight-flip={f}", d=31, k=4, n=3000, seed=s, flip=f) for f in (0.02, 0.05, 0.1) for s in range(10)]
+        out += [dict(arm=f"reweight-trees={m}", d=31, k=4, n=3000, seed=s, trees=m) for m in (100, 500) for s in range(10)]
+        out += [dict(arm="reweight-mtry=10", d=31, k=4, n=3000, seed=s, mtry=10) for s in range(10)]
+    elif exp == "reweight_hard":
+        out = [dict(arm="reweight", d=31, k=5, n=10000, seed=s) for s in range(10)]
+        out += [dict(arm="reweight", d=31, k=6, n=10000, seed=s) for s in range(5)]
+        out += [dict(arm="reweight", d=63, k=4, n=10000, seed=s) for s in range(5)]
+        out += [dict(arm="reweight", d=127, k=3, n=10000, seed=s) for s in range(5)]
+    elif exp == "boost_long":
+        out = [dict(arm="boost-4000", d=31, k=5, n=10000, seed=s, rounds=4000) for s in range(10)]
+        out += [dict(arm="boost-4000", d=31, k=6, n=10000, seed=s, rounds=4000) for s in range(5)]
+        out += [dict(arm="boost-4000", d=63, k=4, n=10000, seed=s, rounds=4000) for s in range(5)]
+    elif exp == "boost_flip":
+        out = [dict(arm=f"boost-4000-flip={f}", d=31, k=4, n=3000, seed=s, rounds=4000, flip=f) for f in (0.02, 0.1) for s in range(10)]
+    elif exp == "mlp_flip":
+        out = [dict(arm=f"mlp-sgd-flip={f}", d=31, k=4, n=3000, seed=s, optim="sgd", steps=20000, flip=f) for f in (0.02, 0.1) for s in range(5)]
     elif exp == "limit":
         out = [dict(arm=m, d=d, k=3, n=10000, seed=s, model=m) for d in (63, 127) for m in ("tree", "forest", "adaboost") for s in range(3)]
     elif exp == "mlp6":
@@ -187,11 +246,11 @@ def cells(exp):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("exp", choices=["timing", "grid", "scale", "knobs", "others", "libs", "limit", "mlp", "mlp6"])
+    ap.add_argument("exp", choices=["timing", "grid", "scale", "knobs", "others", "libs", "limit", "mlp", "mlp6", "reweight_core", "reweight_hard", "boost_long", "boost_flip", "mlp_flip"])
     ap.add_argument("--out", default="runs/boost")
     args = ap.parse_args()
     Path(args.out).mkdir(parents=True, exist_ok=True)
-    runner = dict(others=run_other, libs=run_lib, limit=run_other, mlp=run_mlp, mlp6=run_mlp).get(args.exp, run_boost)
+    runner = dict(others=run_other, libs=run_lib, limit=run_other, mlp=run_mlp, mlp6=run_mlp, mlp_flip=run_mlp, reweight_core=run_reweight, reweight_hard=run_reweight).get(args.exp, run_boost)
     t0 = time.time()
     with open(f"{args.out}/{args.exp}.jsonl", "a") as f:
         for i, cell in enumerate(cells(args.exp)):
